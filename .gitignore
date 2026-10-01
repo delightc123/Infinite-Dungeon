@@ -1,0 +1,104 @@
+# Godot
+.godot/
+export/
+*.import
+
+# .NET / C#
+bin/
+obj/
+*.csproj.old
+*.user
+*.slnx
+
+# Build output
+build/
+
+# macOS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.pyc
+
+# Test output
+tests/bin/
+tests/obj/
+tests/TestResults/
+.ui-test.log
+logs/
+
+# gdUnit4 auto-generated runner scene (regenerated on every build)
+tests/e2e/gdunit4_testadapter_v5/
+
+# Code coverage
+coverage/
+*.coverage
+*.coveragexml
+
+# CI artifacts (screenshots, recordings from E2E runs)
+tests/e2e/screenshots/
+tests/e2e/recordings/
+tests/e2e/artifacts/
+# Track the committed visual-regression baselines — everything else under
+# tests/e2e/screenshots/ (received/ mismatches, ad-hoc Screenshot() captures)
+# stays gitignored.
+!tests/e2e/screenshots/baselines/
+!tests/e2e/screenshots/baselines/**
+
+# Sandbox artifacts
+scenes/sandbox/screenshots/
+scenes/sandbox/recordings/
+
+# GdUnit4 test results
+TestResults/
+
+# dotnet tool manifest restore
+.config/
+
+# Unsorted raw asset downloads
+assets/to-be-sorted/
+
+# Downloaded OGA/Kenney asset packs — available for re-download from the original
+# sources (see assets/downloaded/_oga-* search notes and ADR-007 for provenance).
+# Not tracked in git — they bloat the repo (~40 MB of 3D models, FBX, OBJ, etc.
+# we don't ship from this path) and the extracted sprites that the game actually
+# consumes live under assets/characters/, assets/tiles/, and assets/ui/ instead.
+assets/downloaded/
+
+# Isometric asset source files (Blender, GIMP, PSD)
+assets/isometric/source/
+
+# Visual evidence captures
+docs/evidence/**/demo_screenshot_*.png
+docs/evidence/**/demo_recording_*.mov
+docs/evidence/**/frame_*.png
+
+# Logs
+*.log
+crash_reports/
+
+# Local-only vendored tooling (LPC generator ~855 MB of layer PNGs + HTML app).
+# Our custom batch runner (game-batch.mjs) lives inside but must be tracked.
+tools/lpc-generator/*
+!tools/lpc-generator/game-batch.mjs
+
+# Claude Code session-local runtime state
+.claude/scheduled_tasks.lock
+
+# Context references
+.context/
+.context/infinite-dungeon-game/
+
+# Memory system & agent orchestration
+.memory/
+memory.md
+AGENTS.md
+.rules/

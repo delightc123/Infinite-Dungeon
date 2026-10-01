@@ -1,0 +1,450 @@
+# Item System
+
+## Summary
+
+Items include equipment, consumables, materials, and special objects. Equipment uses a Diablo 2-inspired prefix/suffix affix system. Monsters drop base items only — all magical properties come from deterministic crafting at the Blacksmith.
+
+## Current State
+
+**Spec status: LOCKED (data model).** Item data model, affix structure, and crafting rules are defined. Loot tables (SPEC-06b) and equipment stat effects (SPEC-06c) are separate tickets.
+
+No items are implemented. The only item referenced in the design is the Sacrificial Idol (a consumable that negates backpack loss on death).
+
+## Design
+
+### Item Categories
+
+| Category | Description | Examples |
+|----------|-------------|---------|
+| **Equipment** | Weapons, armor, accessories. Affect stats and combat. | Iron Sword, Leather Helm, Gold Ring |
+| **Consumables** | Single-use effects. Destroyed on use. | Sacrificial Idol, Health Potion, Spell Scroll |
+| **Materials** | Crafting ingredients for the Blacksmith and backpack upgrades. | Iron Ore, Monster Bone, Fire Crystal, Tanned Leather, Mystic Weave |
+| **Special** | Quest items, keys, unique rewards. | Boss Key, Dungeon Map Fragment |
+
+### Stacking Rules
+
+**All item categories stack unlimited per slot.** One slot = one item type, any quantity. The only "limit" is the slot count in the storage (bank or backpack).
+
+- Quantities are stored as a **64-bit signed integer** (`long` in C#). Maximum value: 9,223,372,036,854,775,807 — eight orders of magnitude beyond the largest stacks observed in reference games like Melvor Idle.
+- **No stack splitting within the same storage.** A single item type occupies exactly one slot in the bank, and exactly one slot in the backpack. To "split" a stack, transfer part of it across the bank/backpack boundary via the Guild window's Transfer tab.
+- Equipment stacks only if the rolled affixes match exactly. In practice most affixed equipment is unique, so equipment stacks are rare — but the data model supports it.
+
+### Number Display
+
+Numbers for stacks, gold, and sell prices use **abbreviated formatting** with the exact value in the tooltip:
+
+| Value | Displayed | Tooltip |
+|-------|-----------|---------|
+| 0 – 999 | `0` – `999` | — (no abbreviation needed) |
+| 1,000 – 999,999 | `1.0K` – `999K` | `1,000` – `999,999` |
+| 10⁶ – 10⁹ | `1.0M` – `999M` | full comma-separated |
+| 10⁹ – 10¹² | `1.0B` – `999B` | full comma-separated |
+| 10¹² – 10¹⁵ | `1.0T` – `999T` | full comma-separated |
+| 10¹⁵+ | `Qa` (quadrillion), `Qi` (quintillion), etc. | full comma-separated |
+
+Decimal places shown: 1 decimal for 1.0–99.9K/M/B/T, 0 decimals for 100+K/M/B/T (e.g., `12.3K`, `345K`, `1.2M`, `789M`).
+
+### Known Items
+
+| Item | Type | Source | Effect |
+|------|------|--------|--------|
+| Sacrificial Idol | Consumable | Guild Store (Guild Maid) | Acts as free "Save Both" on death — keeps equipment, backpack items, and backpack gold at no gold cost. EXP loss still applies. Consumed on use. |
+
+### Equipment Slots
+
+Characters have the following equipment slots. Some item types are class-specific.
+
+| Slot | Warrior | Ranger | Mage |
+|------|---------|--------|------|
+| Head | Helmets | Bands | Crowns |
+| Body/Torso | Heavy armor | Light armor | Magic robes |
+| Neck | Necklaces & chokers | Necklaces & chokers | Necklaces & chokers |
+| Rings | 10 ring slots | 10 ring slots | 10 ring slots |
+| Arms (shoulders to forearms) | Gauntlets | Braces | Bangles |
+| Legs (hips to thighs) | Greaves | Chausses/Breeches | Leggings |
+| Feet | Boots | Shoes | Sandals |
+| Main hand | Melee weapons (bladed, blunt, polearms) | Ranged weapons (bows, crossbows, thrown, firearms) | Staves, wands |
+| Off hand | Shields | Defensive melee (knives, small bucklers, claw gauntlets) | Grimoires, magic-enabled defensive items |
+| Ammo slot | — | Magazine items (quivers, mags, projectile bags, bandoliers) | — |
+
+**Notes:**
+- Neck and rings are shared across all classes
+- 10 ring slots is notably generous — encourages build diversity through ring stacking
+- Ranger ammo is unlimited but requires a magazine item equipped in the ammo slot
+- Mage offhand items (grimoires, ward orbs) passively enhance existing Skills — no dedicated mastery
+
+### Item Data Model
+
+Every item in the game follows this structure:
+
+```
+Item {
+  id:               string    // Unique identifier (UUID)
+  name:             string    // Display name (e.g., "Iron Sword")
+  type:             enum      // Equipment | Consumable | Material | Special
+  slot:             enum      // Head | Body | Neck | Ring | Arms | Legs | Feet |
+                              // MainHand | OffHand | Ammo | None
+  class_affinity:    enum     // Warrior | Ranger | Mage | null (universal)
+                              // No restriction — any class can equip. +25% stat bonus when matched.
+  item_level:       int       // Floor it dropped on — gates affix availability
+  base_quality:     enum      // Normal | Superior | Elite
+  base_stats:       dict      // { damage?, defense?, stat_bonus? }
+  affixes:          Affix[]   // Max 3 prefix + 3 suffix = 6 total
+  stack_count:      int       // For stackable items (consumables, materials). 1 for equipment.
+}
+
+Affix {
+  name:   string    // Display name (e.g., "of Strength", "Fiery")
+  type:   enum      // Prefix | Suffix
+  stat:   string    // Which stat/effect it modifies
+  value:  int/float // Deterministic value based on affix tier
+  tier:   int       // Affix power tier (gated by item_level)
+}
+```
+
+### Base Quality
+
+Monster drops come in three base quality tiers, determined by floor depth:
+
+| Quality | Floor Range | Stat Range | Description |
+|---------|-------------|------------|-------------|
+| Normal | All floors | Base values | Standard item. Most common drop. |
+| Superior | Floor 10+ | +10-20% base stats | Better-crafted version. Less common. |
+| Elite | Floor 25+ | +25-40% base stats | Exceptional craftsmanship. Rare drop. |
+
+Quality affects only the item's **base stats** (damage, defense). It does not affect affix slots or affix power.
+
+### Affix System
+
+Affixes are the core of item depth. They are **never** found on drops — all affixes are added by the Blacksmith through deterministic crafting.
+
+**Rules:**
+- Maximum **3 prefixes + 3 suffixes** per item (6 total affixes)
+- Player picks the **exact affix** they want and pays materials. No RNG.
+- **Item level gates affix tiers** — a floor 5 item can only receive low-tier affixes. A floor 50 item can receive much stronger ones.
+- Affixes cannot be removed once applied (choose carefully)
+- Adding an affix costs materials + gold, scaling with affix tier
+
+**Affix tier gating:**
+
+| Affix Tier | Min Item Level | Power Level |
+|------------|---------------|-------------|
+| Tier 1 | 1 | Weak (+1-3 flat, +1-3%) |
+| Tier 2 | 10 | Moderate (+4-8 flat, +4-8%) |
+| Tier 3 | 25 | Strong (+9-15 flat, +9-15%) |
+| Tier 4 | 50 | Powerful (+16-25 flat, +16-25%) |
+| Tier 5 | 75 | Elite (+26-40 flat, +26-40%) |
+| Tier 6 | 100+ | Legendary (+41+ flat, +41+%) |
+
+**Affix categories:**
+
+| Category | Prefix Examples | Suffix Examples |
+|----------|----------------|-----------------|
+| Offensive | Keen (+flat damage), Vicious (+% damage), Swift (+attack speed) | of Striking (+crit chance), of Ruin (+crit damage) |
+| Defensive | Sturdy (+defense), Fortified (+HP), Warding (+damage resist) | of the Bear (+max HP), of Evasion (+dodge) |
+| Utility | Energizing (+mana), Flowing (+mana regen) | of Swiftness (+move speed), of Learning (+XP bonus) |
+| Elemental | Fiery (+fire damage), Frozen (+frost damage), Shocking (+lightning) | of Flame Resist, of Frost Resist, of Storm Resist |
+
+*Affix definitions are implemented in `AffixDatabase.cs`. After AUDIT-10, the registry contains **46 affixes** — 30 across tiers 1-4 and 16 across tiers 5-6. (The SPEC-AFFIX-TIER-LADDER-01 ticket originally counted 28 pre-existing T1-T4 affixes; the actual figure on code was 30 — 2 more than the spec-author estimated. Net roster is unchanged from the spec's intent.) T5/T6 values locked in the T5+T6 ladder table below.*
+
+#### T5 + T6 Affix Ladder (SPEC-AFFIX-TIER-LADDER-01)
+
+T5 ("Elite", min item level 75) and T6 ("Legendary", min item level 100) extend the existing affix families at T4. No new affix families are introduced — T5/T6 are higher-power expressions of already-established mechanics. This keeps the endgame build-identity grounded in familiar levers rather than introducing last-minute novelties.
+
+**Roster (8 families at both T5 and T6):** keen, vicious, sturdy, warding, striking, ruin, bear, swiftness. These were chosen as the most build-defining affixes in the game — flat damage, % damage, flat defense, % damage resist, crit chance, crit damage, max HP, and move speed. Niche affixes (energizing, learning, flame_resist, frozen, shocking, swift, evasion, fiery, fortified) cap at their existing highest tier; this focuses Elite/Legendary progression on the pillars that define a character, not breadth.
+
+**Value progression curve.**
+- Flat values multiply by ≈1.5 per tier above T4 (T4 was ≈1.7× T3, tapering is intentional — diminishing marginal combat impact at high numbers). Damage: T4=22 → T5=35 → T6=50. Max HP: T4=60 → T5=90 → T6=130. Defense: T3=13 → T5=30 → T6=45 (T4 had no sturdy entry; the curve is rebuilt cleanly).
+- Percent values follow items.md power bands directly: T5 targets the upper edge of +26–40% (=35%), T6 targets the lower-mid edge of +41%+ (=50%). No percent affix exceeds 50% at T6 to preserve additive-stacking headroom across the 10-ring build space.
+
+**Gold cost curve.** T1≈50 → T2≈170 → T3≈440 → T4≈860 → T5≈2200 → T6≈4500. Scaling is ≈2.5× per tier above T4, compounding the "pay to access endgame power" tax. T6 costs are meaningful — a full 6-affix T6 craft totals ~27,000 gold, roughly one deep-floor run's income.
+
+**Material cost curve.** T4≈17 → T5≈30 → T6≈50. Materials scale linearly (+13, +20) rather than multiplicatively so the gate is gold-dominant, not material-dominant. Material sinks are expected to come from boss first-kills and deep-floor treasure rooms, not grinding.
+
+**Tier 5 registrations (min item level 75):**
+
+| id | name | type | category | stat | tier | minLevel | value | isPercent | gold | materials |
+|----|------|------|----------|------|------|----------|-------|-----------|------|-----------|
+| `keen_5` | Keen | Prefix | Offensive | damage | 5 | 75 | 35 | false | 2000 | 28 |
+| `vicious_5` | Vicious | Prefix | Offensive | damage_percent | 5 | 75 | 32 | true | 2400 | 32 |
+| `sturdy_5` | Sturdy | Prefix | Defensive | defense | 5 | 75 | 30 | false | 2000 | 28 |
+| `warding_5` | Warding | Prefix | Defensive | damage_resist | 5 | 75 | 28 | true | 2300 | 30 |
+| `striking_5` | of Striking | Suffix | Offensive | crit_chance | 5 | 75 | 18 | true | 2200 | 30 |
+| `ruin_5` | of Ruin | Suffix | Offensive | crit_damage | 5 | 75 | 35 | true | 2400 | 32 |
+| `bear_5` | of the Bear | Suffix | Defensive | max_hp | 5 | 75 | 90 | false | 1900 | 26 |
+| `swiftness_5` | of Swiftness | Suffix | Utility | move_speed | 5 | 75 | 14 | true | 1800 | 25 |
+
+**Tier 6 registrations (min item level 100):**
+
+| id | name | type | category | stat | tier | minLevel | value | isPercent | gold | materials |
+|----|------|------|----------|------|------|----------|-------|-----------|------|-----------|
+| `keen_6` | Keen | Prefix | Offensive | damage | 6 | 100 | 50 | false | 4200 | 45 |
+| `vicious_6` | Vicious | Prefix | Offensive | damage_percent | 6 | 100 | 48 | true | 5000 | 52 |
+| `sturdy_6` | Sturdy | Prefix | Defensive | defense | 6 | 100 | 45 | false | 4200 | 45 |
+| `warding_6` | Warding | Prefix | Defensive | damage_resist | 6 | 100 | 42 | true | 4800 | 50 |
+| `striking_6` | of Striking | Suffix | Offensive | crit_chance | 6 | 100 | 28 | true | 4600 | 48 |
+| `ruin_6` | of Ruin | Suffix | Offensive | crit_damage | 6 | 100 | 50 | true | 5000 | 52 |
+| `bear_6` | of the Bear | Suffix | Defensive | max_hp | 6 | 100 | 130 | false | 4000 | 42 |
+| `swiftness_6` | of Swiftness | Suffix | Utility | move_speed | 6 | 100 | 22 | true | 3800 | 40 |
+
+**Implementation note for AUDIT-10 (landed):** These 16 rows were copied directly into the `Register*` calls under two new comment headers (`// --- Tier 5 (Item Level 75+) ---` and `// --- Tier 6 (Item Level 100+) ---`) in `AffixDatabase.cs` following the existing T1–T4 formatting. No code logic changes — `GetMaxTier` already returned 5/6 at the correct item-level thresholds. Final registry total = **46 affixes** (30 pre-existing T1-T4 + 16 new T5-T6), per the footnote above; the spec's original "28 T1-T4" estimate was 2 low against the actual code, but the 16-affix T5/T6 ladder intent is preserved.
+
+### Crafting at the Blacksmith
+
+The Blacksmith is the only source of magical (affixed) equipment. Crafting is **fully deterministic**.
+
+**Crafting flow:**
+1. Bring a base item (dropped from monsters)
+2. Choose an affix from the available list (filtered by item level and slot)
+3. Pay the material + gold cost
+4. Affix is permanently applied to the item
+5. Repeat up to the 3 prefix + 3 suffix maximum
+
+**Material sources:**
+- Monster drops (common materials)
+- Boss kills (rare materials, first-kill only)
+- Treasure room chests (floor-appropriate materials)
+- Recycling off-affinity gear at the Blacksmith (see below)
+
+**Materials are generic.** Crafting materials are not species-specific — there is no "Goblin Bone" vs. "Skeleton Bone." Materials are tiered by floor depth (e.g., "Iron Ore" from floors 1-10, "Mithril Ore" from floors 25+). Any enemy on a given floor range drops from the same material pool.
+
+**Recycling:** Bring off-affinity gear you don't want → Blacksmith breaks it down into materials. Material yield scales with item level and quality. This ensures no drop feels wasted.
+
+### Loot System
+
+Loot tables and drop rates are defined in SPEC-06b (separate ticket). High-level rules:
+
+- **Monsters drop base items only** (no affixes, no magic)
+- **Drop quality scales with floor depth** (deeper = more Superior/Elite drops)
+- **Class-affinity items drop for any class** (+25% bonus if matched, recyclable if not)
+- **Materials drop alongside equipment** (monsters also drop crafting materials directly)
+- **Boss first-kills drop guaranteed rare materials**
+- **Treasure rooms contain material chests** (no equipment, just crafting ingredients)
+
+### Item Color
+
+Item color uses the **unified color gradient** (see [color-system.md](../systems/color-system.md)). There are no discrete rarity tiers (no "Rare" or "Epic" labels). Instead, an item's color is computed from the level gap between the player and the item's effective level:
+
+- Warm colors (orange/red) = item is above your level, powerful but bonuses may be gated
+- Green/yellow = item is appropriate for your level
+- Cool colors (blue/cyan) = item is below your level, losing relevance
+- Grey = item is far below your level, candidate for recycling at the Blacksmith
+
+The same item shifts color as the player levels. No equipment restrictions on wearing items — any item can be equipped, but abilities/bonuses may be locked if the player is underleveled.
+
+### Sell Pricing
+
+Items can be sold from the Guild window's Bank tab (items must be transferred from backpack to bank first via the Transfer tab).
+
+**Consumables and Materials:** sell price = **100% of buy price**. The Store effectively acts as free storage for basics — you can buy, stockpile, and refund at will. This keeps gold flow from feeling punitive on consumable inventory management.
+
+**Equipment:** sell price derives from base value and affix count:
+
+```
+base_value = item_level × rarity_multiplier × (1 + 0.5 × affix_count)
+sell_price = base_value × 0.10 × (1 + affix_count)
+```
+
+| affix_count | Sell multiplier of base_value |
+|-------------|-------------------------------|
+| 0 affixes | 10% |
+| 1 affix | 20% |
+| 2 affixes | 30% |
+| 3 affixes | 40% |
+| 4 affixes | 50% |
+| 5 affixes | 60% |
+| 6 affixes (max) | 70% |
+
+**Rarity multipliers** (base quality tier from item drop):
+
+| Quality | Multiplier |
+|---------|-----------|
+| Normal | 1.0 |
+| Superior | 1.5 |
+| Elite | 2.5 |
+
+Example: A floor-25 Superior item (item_level=25, multiplier=1.5) with 3 affixes:
+- `base_value = 25 × 1.5 × (1 + 0.5 × 3) = 25 × 1.5 × 2.5 = 93.75g`
+- `sell_price = 93.75 × 0.10 × (1 + 3) = 37.5g`
+
+### Item Actions
+
+Every item has a contextual actions dropdown available in both the Bank and Backpack views (and on equipped slots). Clicking an item slot opens the dropdown.
+
+| Action | Where available | Effect |
+|--------|----------------|--------|
+| Inspect | Bank, Backpack, Equipped | Show full tooltip (affixes, item level, value) |
+| Use | Bank, Backpack | Consumable only — trigger the item's effect |
+| Equip | Bank, Backpack | Equippable only — move item to the matching equipment slot; swap previous out |
+| Unequip | Equipped | Equipped only — move item back to backpack |
+| Sell | Bank | Opens Sell dialog (see below) |
+| Lock / Unlock | Bank, Backpack, Equipped | Toggle lock flag. Locked → Sell and Drop greyed out. For equipped items, Lock prevents accidental unequip. **Lock does not protect from death.** |
+| Transfer | Bank, Backpack | Navigation shortcut — opens the Guild window's Transfer tab with this item pre-selected |
+| **Drop** | Backpack only | Destroys the item permanently. Single-confirmation dialog. Greyed out if Locked. |
+
+Notes:
+- **Bank has no Drop.** Items in the bank cannot be destroyed — use Sell to remove.
+- **Backpack has no Sell.** Transfer to the bank first.
+- **Equipped has no Sell or Drop.** Unequip first.
+
+### Sell Dialog
+
+Opens from the Bank tab's item-actions Sell button. Controls:
+
+- Amount input field (type an exact number) + slider (drag for 0 to stack size)
+- **Sell Amount** button — sells the entered/sliced quantity
+- **Sell All** button — sells the entire stack (with warning dialog)
+- **Sell All but 1** button — sells everything except 1
+- **"Don't ask me again for this item"** checkbox — appears on both the main Sell dialog and the Sell All warning. Persists per-item-ID across sessions. Toggleable at any time.
+
+When "Sell All" is clicked and the per-item warning is not muted, a confirmation dialog appears:
+
+```
+┌──────────────────────────────────┐
+│  Sell ALL 1,847 "Iron Ore"?      │
+│                                  │
+│  Total: 18,470g                  │
+│                                  │
+│  [ ] Don't ask me again for      │
+│      "Iron Ore"                  │
+│                                  │
+│  [Confirm]  [Cancel]             │
+└──────────────────────────────────┘
+```
+
+### Lock Behavior (summary)
+
+- Lock flag lives on the item instance (persists across moves between bank/backpack).
+- Locked items: Sell action greyed out, Drop action greyed out.
+- For equipped items: Locked flag prevents Unequip from the dropdown (must unlock first).
+- **Lock does NOT protect from death-loss.** A locked backpack item is destroyed the same as any other when the player doesn't save the backpack.
+
+## Resolved Questions
+
+| Question | Decision |
+|----------|----------|
+| How does equipment affect stats? | Base stats (damage/defense) + up to 6 affixes (3 prefix + 3 suffix). See affix system above. |
+| Should items have durability? | No. Items are permanent once crafted. Simplicity over maintenance mechanics. |
+| How does the Blacksmith crafting system work? | Deterministic: pick exact affix, pay materials + gold. No RNG. |
+| What's the loot table structure? | Deferred to SPEC-06b. Base items + materials from monsters, rare mats from bosses/treasure rooms. |
+| Should items be tradeable? | No. Single-player game. No trading. |
+
+### Loot Drop Tables (SPEC-06b)
+
+#### Equipment Drop Rates
+
+Every enemy kill has a chance to drop a base item. Drop chance scales with enemy tier and floor depth.
+
+```
+drop_chance(tier) = base_rate(tier) + floor_bonus
+base_rate: Tier 1 = 8%, Tier 2 = 12%, Tier 3 = 18%
+floor_bonus = floor_number * 0.1% (caps at +5%)
+```
+
+| Floor | Tier 1 Drop % | Tier 2 Drop % | Tier 3 Drop % |
+|-------|--------------|--------------|--------------|
+| 1 | 8.1% | 12.1% | 18.1% |
+| 10 | 9.0% | 13.0% | 19.0% |
+| 25 | 10.5% | 14.5% | 20.5% |
+| 50+ | 13.0% (capped) | 17.0% | 23.0% |
+
+#### Base Quality Distribution
+
+When an item drops, its quality tier is rolled:
+
+| Floor Range | Normal | Superior | Elite |
+|-------------|--------|----------|-------|
+| 1–9 | 100% | 0% | 0% |
+| 10–24 | 80% | 20% | 0% |
+| 25–49 | 60% | 35% | 5% |
+| 50–74 | 40% | 45% | 15% |
+| 75–99 | 25% | 50% | 25% |
+| 100+ | 15% | 50% | 35% |
+
+#### Item Type Distribution
+
+When an equipment item drops, the slot is rolled with equal weight across all valid slots for the enemy's floor. Class-affinity items drop for any class — +25% bonus if matched, recyclable at Blacksmith if not.
+
+#### Material Drops
+
+Every enemy kill has a separate material drop chance (independent of equipment drops):
+
+```
+material_drop_chance = 25% (flat, all enemies)
+material_tier = floor-appropriate (higher floors drop better materials)
+```
+
+Boss first-kills: guaranteed 3-5 rare materials (one-time only).
+Treasure room chests: 5-8 materials of floor-appropriate tier.
+
+### Equipment Stat Effects (SPEC-06c)
+
+#### How Defense Works
+
+Equipment defense reduces incoming damage via a diminishing returns formula (same curve as stats):
+
+```
+effective_defense = total_defense * (100 / (total_defense + 100))
+damage_reduction_percent = effective_defense
+final_damage = incoming_damage * (1 - damage_reduction_percent / 100)
+```
+
+| Total Defense | Damage Reduction | 100 Incoming → Takes |
+|--------------|-----------------|---------------------|
+| 10 | 9.1% | 91 |
+| 25 | 20.0% | 80 |
+| 50 | 33.3% | 67 |
+| 100 | 50.0% | 50 |
+| 200 | 66.7% | 33 |
+
+Defense never reaches 100% reduction — enemies always deal some damage.
+
+#### How Equipment Stats Stack
+
+All equipment stats are additive within their category:
+
+- **Flat bonuses** from all equipped items are summed, then added to base stats
+- **Percentage bonuses** from all equipped items are summed into one total %, then applied multiplicatively
+- **Affix bonuses** follow the same rules — they're just stats on items
+
+```
+total_flat_bonus = sum(all equipped item flat bonuses)
+total_percent_bonus = sum(all equipped item percent bonuses)
+final_stat = (base_stat + total_flat_bonus) * (1 + total_percent_bonus / 100)
+```
+
+**10 ring slots** can stack the same affix type across all rings. This is intentional — ring stacking is a major build customization vector.
+
+#### Weapon Damage
+
+Main hand weapon provides base damage used in the STR melee damage formula (see [stats.md](stats.md)):
+
+```
+total_melee_damage = (base_weapon_damage + flat_melee_bonus_from_STR) * (1 + percent_melee_boost_from_STR / 100)
+```
+
+Weapon base damage scales with item level and quality:
+
+| Item Level | Normal Base Damage | Superior | Elite |
+|-----------|-------------------|----------|-------|
+| 1 | 5–8 | 6–10 | 7–12 |
+| 10 | 15–22 | 18–26 | 20–30 |
+| 25 | 35–50 | 42–60 | 47–68 |
+| 50 | 70–100 | 84–120 | 94–135 |
+| 100 | 140–200 | 168–240 | 189–270 |
+
+*Values are locked. Tunable during playtesting only — the formulas and scaling curves are final.*
+
+## Resolved Questions
+
+| Question | Decision |
+|----------|----------|
+| Equipment stats | Flat + % bonuses, additive within category, multiplicative across categories |
+| Durability | No. Items are permanent. |
+| Crafting system | Deterministic affix application at Blacksmith. See above. |
+| Loot tables | Floor-scaled drop rates, quality distribution, separate material drops |
+| Trading | No. Single-player. |
+| Drop rate tables | Defined above. Tier-based + floor bonus. |
+| Material costs per affix | Scales with affix tier. Exact costs are implementation-phase balancing. |
+| Full affix list | Representative categories defined. Full list is implementation-phase content. |
+| Defense formula | Diminishing returns, same K=100 curve as stats. |

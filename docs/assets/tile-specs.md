@@ -1,0 +1,314 @@
+# Tile Asset Specifications
+
+## Summary
+
+All tile assets used for the isometric dungeon floor and walls. **[Screaming Brain Studios](https://opengameart.org/users/screaming-brain-studios)** (CC0) is the sole source for all isometric textures and tiles. The primary environment tileset is **Isometric Stone Soup (ISS)**, which defines the game's tile grid standard: **64x32 floor tiles, 64x64 wall blocks**.
+
+## Current State
+
+ISS provides 49 floor theme sheets (64x32) and 43 wall block sheets (64x64) with full/half block variants and top-face overlays. Magenta (#FF00FF) backgrounds are used as the transparency key. The earlier Python-generated placeholder tiles (floor.png, wall.png) are superseded by ISS sprites but retained below for reference.
+
+## Design
+
+### Tile Format and Dimensions
+
+- **Format:** PNG with alpha channel (RGBA, 4 bytes per pixel)
+- **Tile size:** 64 pixels wide, 32 pixels tall
+- **Aspect ratio:** 2:1 (standard isometric projection ratio)
+- **Bit depth:** 8 bits per channel, 4 channels (32-bit color)
+- **Color space:** sRGB (default PNG color space)
+
+### Diamond Geometry
+
+Every tile is an isometric diamond (rhombus) inscribed within the 64x32 pixel rectangle. All pixels outside the diamond boundary are fully transparent (alpha = 0). The diamond is defined by four vertices:
+
+| Vertex | Position (x, y) | Description |
+|--------|-----------------|-------------|
+| Top | (32, 0) | Top-center of the rectangle |
+| Right | (64, 16) | Right-center of the rectangle (or 63, 16 for 0-indexed) |
+| Bottom | (32, 32) | Bottom-center of the rectangle (or 32, 31 for 0-indexed) |
+| Left | (0, 16) | Left-center of the rectangle |
+
+```
+            (32, 0)
+           /        \
+          /          \
+         /            \
+        /              \
+(0, 16)                (64, 16)
+        \              /
+         \            /
+          \          /
+           \        /
+            (32, 32)
+```
+
+**Diamond Interior Test:**
+A pixel at position (x, y) is inside the diamond if and only if:
+
+```
+|x - cx| / cx + |y - cy| / cy <= 1.0
+```
+
+Where `cx = 32.0` (half-width) and `cy = 16.0` (half-height). This is a normalized Manhattan distance from the center of the tile. A value of exactly 1.0 lies on the diamond edge; less than 1.0 is interior; greater than 1.0 is exterior.
+
+### Floor Tile (floor.png)
+
+| Property | Value |
+|----------|-------|
+| File path | `assets/tiles/floor.png` |
+| Dimensions | 64 x 32 pixels |
+| Fill color | RGB(36, 49, 74) / `#24314a` -- dark blue-gray |
+| Fill alpha | 255 (fully opaque) inside diamond |
+| Exterior alpha | 0 (fully transparent) outside diamond |
+| Purpose | Walkable floor area |
+| Physics collision | None -- no collision polygon |
+
+The floor tile is a solid-colored isometric diamond. Every pixel inside the diamond boundary (normalized distance <= 1.0) is filled with `#24314a` at full opacity. Every pixel outside the diamond is RGBA(0, 0, 0, 0).
+
+### Wall Tile (wall.png)
+
+| Property | Value |
+|----------|-------|
+| File path | `assets/tiles/wall.png` |
+| Dimensions | 64 x 32 pixels |
+| Outline color | RGB(60, 70, 100) / `#3c4664` at alpha 255 |
+| Interior color | RGB(60, 70, 100) / `#3c4664` at alpha 128 |
+| Outline region | Normalized distance > 0.85 and <= 1.0 (outer ~15% of diamond) |
+| Interior region | Normalized distance <= 0.85 |
+| Exterior alpha | 0 (fully transparent) outside diamond |
+| Purpose | Impassable walls, room boundaries |
+| Physics collision | Diamond-shaped collision polygon matching the tile vertices |
+
+The wall tile has two visual zones within the diamond:
+
+1. **Outline zone** (distance 0.85 to 1.0): Full opacity (alpha 255) -- creates a visible edge.
+2. **Interior zone** (distance 0.0 to 0.85): Half opacity (alpha 128) -- semi-transparent fill to distinguish from floor.
+
+Both zones use the same RGB color `#3c4664` but differ in alpha. This creates a visible border ring around a subtler interior.
+
+**Collision polygon vertices (for Godot TileMapLayer):**
+```
+PackedVector2Array[(32, 0), (64, 16), (32, 32), (0, 16)]
+```
+
+These four vertices define the diamond collision shape assigned to wall tiles in the TileSet physics layer.
+
+### Diamond Distance Calculation (Detailed)
+
+For any pixel at integer coordinates (x, y) in a 64x32 image:
+
+```python
+cx = 32.0  # Center X (half of 64)
+cy = 16.0  # Center Y (half of 32)
+
+# Normalized Manhattan distance from center
+distance = abs(x - cx) / cx + abs(y - cy) / cy
+
+# Classification:
+# distance <= 0.85  -> wall interior (alpha 128) or floor fill (alpha 255)
+# distance <= 1.0   -> wall outline (alpha 255) or floor fill (alpha 255)
+# distance > 1.0    -> transparent (alpha 0)
+```
+
+Example pixel classifications for the wall tile:
+
+| Pixel (x, y) | Distance | Zone | Alpha |
+|---------------|----------|------|-------|
+| (32, 16) -- center | 0.0 | Interior | 128 |
+| (32, 0) -- top vertex | 1.0 | Outline | 255 |
+| (48, 8) -- mid-right-upper | 0.5 + 0.5 = 1.0 | Outline | 255 |
+| (40, 12) -- near center | 0.25 + 0.25 = 0.5 | Interior | 128 |
+| (0, 0) -- corner | 1.0 + 1.0 = 2.0 | Exterior | 0 |
+| (55, 16) -- right edge interior | 0.719 + 0.0 = 0.719 | Interior | 128 |
+| (60, 16) -- right edge outline | 0.875 + 0.0 = 0.875 | Outline | 255 |
+
+### Tile Generation Script
+
+Complete Python script that generates both `floor.png` and `wall.png` as minimal valid PNG files using only the standard library (`struct`, `zlib`):
+
+```python
+#!/usr/bin/env python3
+"""Generate isometric tile PNGs for 'A Dungeon in the Middle of Nowhere'.
+
+Creates:
+  assets/tiles/floor.png  -- 64x32 solid dark-blue diamond
+  assets/tiles/wall.png   -- 64x32 two-tone diamond (outline + semi-transparent interior)
+
+No external dependencies -- uses struct + zlib to write minimal valid PNGs.
+"""
+
+import os
+import struct
+import zlib
+
+# ---------------------------------------------------------------------------
+# Tile dimensions
+# ---------------------------------------------------------------------------
+WIDTH = 64
+HEIGHT = 32
+CX = WIDTH / 2.0   # 32.0
+CY = HEIGHT / 2.0  # 16.0
+
+# ---------------------------------------------------------------------------
+# Colors (R, G, B, A)
+# ---------------------------------------------------------------------------
+FLOOR_COLOR = (36, 49, 74, 255)          # #24314a, fully opaque
+WALL_OUTLINE = (60, 70, 100, 255)        # #3c4664, fully opaque
+WALL_INTERIOR = (60, 70, 100, 128)       # #3c4664, half-transparent
+TRANSPARENT = (0, 0, 0, 0)              # Fully transparent
+
+WALL_OUTLINE_THRESHOLD = 0.85           # Normalized distance threshold
+
+
+def diamond_distance(x: int, y: int) -> float:
+    """Return the normalized Manhattan distance from the tile center.
+
+    A value <= 1.0 means the pixel is inside the diamond.
+    A value > 1.0 means the pixel is outside.
+    """
+    return abs(x - CX) / CX + abs(y - CY) / CY
+
+
+def make_floor_pixel(x: int, y: int) -> tuple[int, int, int, int]:
+    """Return RGBA for a floor tile pixel."""
+    if diamond_distance(x, y) <= 1.0:
+        return FLOOR_COLOR
+    return TRANSPARENT
+
+
+def make_wall_pixel(x: int, y: int) -> tuple[int, int, int, int]:
+    """Return RGBA for a wall tile pixel."""
+    d = diamond_distance(x, y)
+    if d > 1.0:
+        return TRANSPARENT
+    if d > WALL_OUTLINE_THRESHOLD:
+        return WALL_OUTLINE
+    return WALL_INTERIOR
+
+
+def create_png(width: int, height: int, pixel_func) -> bytes:
+    """Create a minimal valid PNG file in memory.
+
+    Args:
+        width: Image width in pixels.
+        height: Image height in pixels.
+        pixel_func: Callable(x, y) -> (R, G, B, A) for each pixel.
+
+    Returns:
+        Complete PNG file as bytes.
+    """
+    # Build raw image data (filter byte 0 = None for each row, then RGBA pixels)
+    raw_rows = []
+    for y in range(height):
+        row = b'\x00'  # Filter type: None
+        for x in range(width):
+            r, g, b, a = pixel_func(x, y)
+            row += struct.pack('BBBB', r, g, b, a)
+        raw_rows.append(row)
+    raw_data = b''.join(raw_rows)
+
+    # Compress with zlib (deflate)
+    compressed = zlib.compress(raw_data)
+
+    # --- PNG file structure ---
+    # Signature
+    signature = b'\x89PNG\r\n\x1a\n'
+
+    # IHDR chunk
+    ihdr_data = struct.pack('>IIBBBBB', width, height, 8, 6, 0, 0, 0)
+    # 8 = bit depth, 6 = RGBA color type, 0 = compression, 0 = filter, 0 = interlace
+    ihdr_chunk = _make_chunk(b'IHDR', ihdr_data)
+
+    # IDAT chunk (compressed image data)
+    idat_chunk = _make_chunk(b'IDAT', compressed)
+
+    # IEND chunk
+    iend_chunk = _make_chunk(b'IEND', b'')
+
+    return signature + ihdr_chunk + idat_chunk + iend_chunk
+
+
+def _make_chunk(chunk_type: bytes, data: bytes) -> bytes:
+    """Create a PNG chunk: length + type + data + CRC32."""
+    length = struct.pack('>I', len(data))
+    crc = struct.pack('>I', zlib.crc32(chunk_type + data) & 0xFFFFFFFF)
+    return length + chunk_type + data + crc
+
+
+def main():
+    os.makedirs('assets/tiles', exist_ok=True)
+
+    # Generate floor tile
+    floor_png = create_png(WIDTH, HEIGHT, make_floor_pixel)
+    with open('assets/tiles/floor.png', 'wb') as f:
+        f.write(floor_png)
+    print(f'Created assets/tiles/floor.png ({len(floor_png)} bytes)')
+
+    # Generate wall tile
+    wall_png = create_png(WIDTH, HEIGHT, make_wall_pixel)
+    with open('assets/tiles/wall.png', 'wb') as f:
+        f.write(wall_png)
+    print(f'Created assets/tiles/wall.png ({len(wall_png)} bytes)')
+
+
+if __name__ == '__main__':
+    main()
+```
+
+**Usage:**
+```bash
+cd /path/to/infinite-dungeon-game
+python3 scripts/generate_tiles.py
+```
+
+**Expected output:**
+```
+Created assets/tiles/floor.png (~350 bytes)
+Created assets/tiles/wall.png (~420 bytes)
+```
+
+File sizes are small because the images are tiny (64x32) and heavily compressible (large transparent regions, few unique colors).
+
+### Wall Blocks (ISS)
+
+Wall blocks are 64x64 isometric cubes. Each ISS wall sheet contains:
+- **Full blocks** — complete cube face visible from isometric angle
+- **Half blocks** — shorter variant for variation and transitions
+- **Top-face overlays** — flat tiles placed on top of walls to hide decorations on upper faces
+
+Wall blocks are placed on a separate TileMapLayer (64x64 tile size) from floors (64x32 tile size).
+
+### Overlay Tile Sizes
+
+Several SBS packs provide decoration overlays rendered at 2x the base ISS grid resolution. These are layered on top of the base floor/wall tiles for visual detail.
+
+| Category | Dimensions | Packs | Directory |
+|----------|-----------|-------|-----------|
+| Road overlays | 128x64 | 700 Isometric Road Tiles | `tiles/roads/` |
+| Pathway overlays | 128x64 | 5000 Isometric Pathway Tiles | `tiles/pathways/` |
+| Autotile overlays | 128x64 | Floor Tile Update 1 - Autotiles | `tiles/autotiles/` |
+| Water overlays | 128x64 | Floor Tile Update 2 - Water | `tiles/water/` |
+| Wall texture overlays | 128x128 | Isometric Wall Texture Pack | `tiles/wall-textures/` |
+
+**128x64 tiles** follow the same 2:1 isometric diamond ratio as the base 64x32 floor tiles but at double resolution. They cover the same logical grid cell.
+
+**128x128 tiles** follow the same ratio as the base 64x64 wall blocks at double resolution. They cover one logical wall block cell.
+
+These overlays are decoration-only -- they do not define collision or walkability. The base ISS tiles (64x32 floors, 64x64 walls) remain the authoritative grid for gameplay logic.
+
+### Future Tile Types (Planned)
+
+Doors, stairs, safe spots, traps, and chests will be implemented as scene objects (Node2D with Sprite2D + collision) placed on top of the floor layer, not as tilemap tiles. Door sprites already exist in `assets/isometric/objects/tiledoor*.png`. ISS provides stair floor tiles (`ISS_Floor_Stairs-64x32.png`).
+
+## Implementation Notes
+
+- Two TileMapLayers: **FloorLayer** (TileSize 64x32, no physics) and **WallLayer** (TileSize 64x64, collision on physics layer 1).
+- Both configured with `TileShape = TileSet.TILE_SHAPE_ISOMETRIC`.
+- ISS sprites use magenta (#FF00FF) backgrounds — import with transparency key or pre-process to alpha.
+- ISS includes 86 Tiled `.tsx` files for prototyping layouts before implementing in Godot.
+- The Python generation script (`scripts/generate_tiles.py`) produced the original placeholder tiles and is no longer needed for environment art.
+
+## Licensing
+
+All tile assets must use one of the following licenses: **CC0**, **CC-BY 3.0**, or **CC-BY 4.0**. Any asset requiring attribution must be listed in [`assets/ATTRIBUTION.md`](../../assets/ATTRIBUTION.md).

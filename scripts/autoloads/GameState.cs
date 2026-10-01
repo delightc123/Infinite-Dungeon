@@ -1,0 +1,261 @@
+using Godot;
+using System;
+
+namespace DungeonGame.Autoloads;
+
+public partial class GameState : Node
+{
+    public static GameState Instance { get; private set; } = null!;
+
+    [Signal] public delegate void StatsChangedEventHandler();
+    [Signal] public delegate void PlayerDiedEventHandler();
+
+    private int _hp = 100;
+    public int Hp
+    {
+        get => _hp;
+        set
+        {
+            _hp = Math.Clamp(value, 0, MaxHp);
+            EmitSignal(SignalName.StatsChanged);
+            if (_hp <= 0 && !IsDead)
+            {
+                IsDead = true;
+                EmitSignal(SignalName.PlayerDied);
+            }
+        }
+    }
+
+    private int _maxHp = 100;
+    public int MaxHp
+    {
+        get => _maxHp;
+        set
+        {
+            _maxHp = value;
+            EmitSignal(SignalName.StatsChanged);
+        }
+    }
+
+    private int _xp = 0;
+    public int Xp
+    {
+        get => _xp;
+        set
+        {
+            _xp = value;
+            EmitSignal(SignalName.StatsChanged);
+        }
+    }
+
+    private int _level = 1;
+    public int Level
+    {
+        get => _level;
+        set
+        {
+            _level = value;
+            EmitSignal(SignalName.StatsChanged);
+        }
+    }
+
+    private int _mana = 0;
+    public int Mana
+    {
+        get => _mana;
+        set
+        {
+            _mana = Math.Clamp(value, 0, MaxMana);
+            EmitSignal(SignalName.StatsChanged);
+        }
+    }
+
+    private int _maxMana = 0;
+    public int MaxMana
+    {
+        get => _maxMana;
+        set
+        {
+            _maxMana = value;
+            EmitSignal(SignalName.StatsChanged);
+        }
+    }
+
+    private int _floorNumber = 1;
+    public int FloorNumber
+    {
+        get => _floorNumber;
+        set
+        {
+            _floorNumber = value;
+            if (value > DeepestFloor)
+                DeepestFloor = value;
+            EmitSignal(SignalName.StatsChanged);
+        }
+    }
+
+    public bool IsDead { get; set; } = false;
+    public int DeepestFloor { get; set; } = 1;
+    public PlayerClass SelectedClass { get; set; } = PlayerClass.Warrior;
+    public Inventory PlayerInventory { get; set; } = new(Constants.PlayerStats.BackpackStartingSlots);
+    public StatBlock Stats { get; private set; } = new();
+    public ProgressionTracker Progression { get; set; } = new(PlayerClass.Warrior);
+    public Bank PlayerBank { get; set; } = new();
+    public QuestTracker Quests { get; set; } = new();
+    public AchievementTracker Achievements { get; set; } = new();
+
+    // Skill hotbar (Diablo-style, keys 1-4)
+    public SkillBar SkillHotbar { get; set; } = new();
+
+    // Endgame systems (END-01 through END-05)
+    public ZoneSaturation Saturation { get; set; } = new();
+    public DungeonPacts Pacts { get; set; } = new();
+    public DungeonIntelligence Intelligence { get; set; } = new();
+    public MagiculeAttunement Attunement { get; set; } = new();
+
+    // Equipment (SYS-11)
+    public EquipmentSet Equipment { get; set; } = new();
+
+    /// <summary>
+    /// Index (0..SaveManager.SlotCount-1) of the save slot this character owns.
+    /// Set when a slot is loaded (Load Game) OR reserved (New Game splash flow), and
+    /// preserved across <see cref="Reset"/> — the slot is character identity, not run state.
+    /// Null only at boot before any New-Game reservation or Load-Game has happened.
+    /// </summary>
+    public int? CurrentSaveSlot { get; set; }
+
+    public override void _Ready()
+    {
+        Instance = this;
+        GameSettings.Load();
+    }
+
+    public void Reset()
+    {
+        IsDead = false;
+        MaxHp = Constants.PlayerStats.StartingHp;
+        Hp = Constants.PlayerStats.StartingHp;
+        int baseMana = Constants.PlayerStats.GetClassBaseMana(SelectedClass);
+        MaxMana = baseMana;
+        Mana = baseMana;
+        Xp = 0;
+        Level = 1;
+        FloorNumber = 1;
+        DeepestFloor = 1;
+        PlayerInventory = new Inventory(Constants.PlayerStats.BackpackStartingSlots);
+        PlayerInventory.Gold = Constants.PlayerStats.StartingGold;
+        Stats = new StatBlock();
+        Progression = new ProgressionTracker(SelectedClass);
+        PlayerBank = new Bank();
+        Quests = new QuestTracker();
+        Quests.GenerateQuests(1);
+        Achievements = new AchievementTracker();
+        SkillHotbar = new SkillBar();
+        Saturation = new ZoneSaturation();
+        Pacts = new DungeonPacts();
+        Intelligence = new DungeonIntelligence();
+        Attunement = new MagiculeAttunement();
+        Equipment = new EquipmentSet();
+        // CurrentSaveSlot is intentionally preserved across Reset(): it identifies
+        // which save file this character owns, not run state. The New Game flow
+        // reserves a slot on the splash screen BEFORE ClassSelect.Reset() runs;
+        // wiping it here would cause the first autosave to fall through to slot 0
+        // and silently overwrite an existing save.
+        EquipStartingGear();
+    }
+
+    private void EquipStartingGear()
+    {
+        // Per docs/systems/equipment.md: starting weapon + off-hand/ammo, no armor or accessories.
+        // Uses tier-1 catalog items (ITEM-01).
+        string mainHandId = SelectedClass switch
+        {
+            PlayerClass.Warrior => "mainhand_warrior_sword_t1",
+            PlayerClass.Ranger => "mainhand_ranger_shortbow_t1",
+            PlayerClass.Mage => "mainhand_mage_staff_t1",
+            _ => "mainhand_warrior_sword_t1",
+        };
+        (string offOrAmmoId, EquipSlot slot) = SelectedClass switch
+        {
+            PlayerClass.Warrior => ("offhand_warrior_shield_small_t1", EquipSlot.OffHand),
+            PlayerClass.Ranger => ("ammo_quiver_basic", EquipSlot.Ammo),
+            PlayerClass.Mage => ("offhand_mage_grimoire_t1", EquipSlot.OffHand),
+            _ => ("offhand_warrior_shield_small_t1", EquipSlot.OffHand),
+        };
+        var main = ItemDatabase.Get(mainHandId);
+        if (main != null) Equipment.ForceEquip(EquipSlot.MainHand, main);
+        var off = ItemDatabase.Get(offOrAmmoId);
+        if (off != null) Equipment.ForceEquip(slot, off);
+    }
+
+    public void AwardXp(int amount)
+    {
+        Xp += amount;
+        int xpToLevel = Constants.Leveling.GetXpToLevel(Level);
+        while (Xp >= xpToLevel)
+        {
+            Xp -= xpToLevel;
+            Level += 1;
+
+            // Apply class stat bonuses for this level
+            Stats.ApplyClassLevelBonus(SelectedClass);
+
+            // Spec (point-economy.md): SP — 2 per level, +1 at milestones; AP — 3 per level, +2 at milestones
+            bool isMilestone = Level % 10 == 0;
+            Progression.SkillPoints += isMilestone ? 3 : 2;
+            Progression.AbilityPoints += isMilestone ? 5 : 3;
+
+            // Spec (leveling.md): stat points — 3 per level, +2 extra at milestones (every 10th)
+            if (isMilestone)
+                Stats.FreePoints += 2; // bonus on top of the 3 from ApplyClassLevelBonus
+
+            // Achievement counters
+            Achievements.SetCounter("player_level", Level);
+            string classCounter = SelectedClass switch
+            {
+                PlayerClass.Warrior => "warrior_level",
+                PlayerClass.Ranger => "ranger_level",
+                PlayerClass.Mage => "mage_level",
+                _ => "player_level",
+            };
+            Achievements.SetCounter(classCounter, Level);
+
+            // Recalculate MaxHp including STA bonus (spec: leveling.md)
+            MaxHp = Constants.PlayerStats.GetEffectiveMaxHp(Level, Stats.BonusMaxHp);
+            // Spec: HP restore = floor(max_hp * 0.15)
+            int healAmount = (int)(MaxHp * Constants.PlayerStats.HealOnLevelUpPercent);
+            Hp = Math.Min(MaxHp, Hp + healAmount);
+
+            // Recalculate MaxMana including INT bonus (spec: stats.md)
+            MaxMana = Constants.PlayerStats.GetClassBaseMana(SelectedClass) + Stats.BonusMaxMana;
+            Mana = MaxMana; // Full mana restore on level-up
+            xpToLevel = Constants.Leveling.GetXpToLevel(Level);
+        }
+    }
+
+    public void TakeDamage(int amount)
+    {
+        if (IsDead)
+            return;
+        Hp -= amount;
+    }
+
+    /// <summary>
+    /// Evaluate achievements and show toasts for any newly unlocked.
+    /// Call after significant game events.
+    /// </summary>
+    public void CheckAchievements()
+    {
+        var newlyUnlocked = Achievements.Evaluate();
+        foreach (var achievement in newlyUnlocked)
+        {
+            string msg = $"Achievement: {achievement.Name}";
+            if (achievement.GoldReward > 0)
+            {
+                PlayerInventory.Gold += achievement.GoldReward;
+                msg += $" (+{achievement.GoldReward}g)";
+            }
+            Ui.Toast.Instance?.Success(msg);
+        }
+    }
+}
